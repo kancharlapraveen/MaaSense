@@ -1,0 +1,102 @@
+#UPDATED CODE
+#include <Wire.h>
+#include <Adafruit_TCS34725.h>
+
+// --- PIN DEFINITIONS ---
+const int FLUX_PIN      = 34;   
+const int BUZZER_PIN    = 25;   
+const int WHITE_LED_PIN = 18;  // Safe
+const int YELLOW_LED_PIN = 19; // Yellow Fluid
+const int CONTRACTION_LED = 5; // Dedicated Contraction LED
+const int RED_LED_PIN    = 17; // Red Fluid (Blood) - Use GPIO 17 or any free pin
+
+// --- THRESHOLDS ---
+const float CONTRACTION_VOLT_LIMIT = 0.5; 
+const int RED_COLOR_LIMIT = 200; 
+const unsigned long ONE_HOUR_MS = 3600000;
+
+// --- BUFFER & TRACKING ---
+unsigned long contractionBuffer[50];
+int bufferIndex = 0;
+bool isCurrentlyContracting = false;
+unsigned long contractionStartTime = 0;
+
+Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(WHITE_LED_PIN, OUTPUT); 
+  pinMode(YELLOW_LED_PIN, OUTPUT); 
+  pinMode(CONTRACTION_LED, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+
+  if (!tcs.begin()) Serial.println("Color Sensor Error!");
+  for(int i=0; i<50; i++) contractionBuffer[i] = 0;
+}
+
+void loop() {
+  // 1. SENSOR READINGS
+  float voltage = (analogRead(FLUX_PIN) * 3.3) / 4095.0;
+  uint16_t r, g, b, c;
+  tcs.getRawData(&r, &g, &b, &c);
+
+  // 2. LOGIC EVALUATION
+  bool isContracting = (voltage > CONTRACTION_VOLT_LIMIT);
+  bool isRedFluid = (r > RED_COLOR_LIMIT && r > g * 1.5);
+  bool isYellowFluid = (r > 400 && g > 400 && b < (r * 0.6));
+
+  // --- HOURLY PATTERN TRACKING ---
+  if (isContracting && !isCurrentlyContracting) {
+    isCurrentlyContracting = true;
+    contractionStartTime = millis();
+  } else if (!isContracting && isCurrentlyContracting) {
+    unsigned long duration = millis() - contractionStartTime;
+    isCurrentlyContracting = false;
+    if (duration > 30000 && duration < 90000) {
+      contractionBuffer[bufferIndex] = millis();
+      bufferIndex = (bufferIndex + 1) % 50;
+    }
+  }
+
+  int hourlyCount = 0;
+  for (int i = 0; i < 50; i++) {
+    if (contractionBuffer[i] > 0 && (millis() - contractionBuffer[i] < ONE_HOUR_MS)) hourlyCount++;
+  }
+
+  // 3. LED & BUZZER PRIORITY OUTPUT
+  
+  // Default: All Off, White On
+  digitalWrite(WHITE_LED_PIN, HIGH);
+  digitalWrite(RED_LED_PIN, LOW);
+  digitalWrite(YELLOW_LED_PIN, LOW);
+  digitalWrite(CONTRACTION_LED, LOW);
+
+  // PRIORITY 1: RED FLUID (CRITICAL)
+  if (isRedFluid) {
+    digitalWrite(WHITE_LED_PIN, LOW);
+    digitalWrite(RED_LED_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH); delay(50); digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // PRIORITY 2: CONTRACTIONS (Pattern or Active)
+  if (isContracting || hourlyCount >= 4) {
+    digitalWrite(WHITE_LED_PIN, LOW);
+    digitalWrite(CONTRACTION_LED, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH); delay(150); digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // PRIORITY 3: YELLOW FLUID
+  if (isYellowFluid) {
+    digitalWrite(WHITE_LED_PIN, LOW);
+    digitalWrite(YELLOW_LED_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH); delay(400); digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // SERIAL DEBUG
+  Serial.print("V: "); Serial.print(voltage);
+  Serial.print(" | R: "); Serial.print(r);
+  Serial.print(" | HourCount: "); Serial.println(hourlyCount);
+
+  delay(300); 
+}
